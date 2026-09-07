@@ -27,7 +27,7 @@ from aiogram.types import Message
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
 
 # Username админов (без @), которым разрешено запускать/останавливать челленджи
-ADMIN_USERNAMES = {"nexoraizfuck", "Raivens1", "Mtl_sr"}
+ADMIN_USERNAMES = {"nexoraizfuck", "Meduza_owner"}
 
 logging.basicConfig(level=logging.INFO)
 
