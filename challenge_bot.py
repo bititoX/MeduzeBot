@@ -36,7 +36,7 @@ from aiogram.types import Message
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
 
-ADMIN_USERNAMES = {"nexoraizfuck", "Raivens1", "Mtl_sr"}
+ADMIN_USERNAMES = {"nexoraizfuck", "Meduza_owner"}
 ADMINS_LINE = " ".join(f"@{u}" for u in ADMIN_USERNAMES)
 
 logging.basicConfig(level=logging.INFO)
@@ -96,16 +96,39 @@ DIGIT_PREMIUM_IDS = {
     },
 }
 
-# У баскетбола каждое значение — своя ситуация, а не просто "попал/не попал",
-# поэтому у каждого значения своя фраза. 1 и 5 — по аналогии с тем, что дано
-# (промах / попадание), поправь текст сам, если нужно другое слово.
+# У каждого типа дайса и каждого значения — своя фраза (не одна общая на все).
 BASKETBALL_PHRASES = {
-    1: "Кинуть в молоко",
+    1: "промахнуться",
     2: "промахнуться",
     3: "Мячик застрял",
     4: "Попасть",
     5: "Попасть в кольцо идеально",
 }
+DARTS_PHRASES = {
+    1: "Отскок",
+    2: "Попасть на край",
+    3: "Попасть на край",
+    4: "Ближе к центру",
+    5: "Очень близко",
+    6: "Попасть ровно в центр",
+}
+BOWLING_PHRASES = {
+    1: "Выбить 0 кегль",
+    2: "Выбить 1 кегль",
+    3: "Выбить 3 кегль",
+    4: "Выбить 4 кегль",
+    5: "Выбить 5 кегль",
+    6: "Выбить 6 кегль",
+}
+CUBE_PHRASES = {
+    1: "Выбить 1",
+    2: "Выбить 2",
+    3: "Выбить 3",
+    4: "Выбить 4",
+    5: "Выбить 5",
+    6: "Выбить 6",
+}
+DICE_PHRASES = {"🏀": BASKETBALL_PHRASES, "🎯": DARTS_PHRASES, "🎳": BOWLING_PHRASES, "🎲": CUBE_PHRASES}
 
 
 def tg(key: str, fallback: str) -> str:
@@ -151,16 +174,11 @@ DICE_PODRYAD_COMMAND_TO_EMOJI = {
 def target_description(emoji: str, value: int) -> str:
     """Человекочитаемое описание цели для конкретного дайса и значения."""
     digit = digit_html(emoji, value)
-    if emoji == "🎯":
-        return f"Попасть ровно в центр {digit}"
-    if emoji == "🎳":
-        return f"Выбить все кегли {digit}"
-    if emoji == "🏀":
-        phrase = BASKETBALL_PHRASES.get(value, "Попасть")
-        return f"{phrase} {digit}"
     if emoji == "🎲":
-        return f"{digit} {tg('cube_icon', '🎲')}"
-    return digit
+        phrase = CUBE_PHRASES.get(value, "Выбить")
+        return f"{phrase} {digit} {tg('cube_icon', '🎲')}"
+    phrase = DICE_PHRASES.get(emoji, {}).get(value, "Попасть")
+    return f"{phrase} {digit}"
 
 
 DICE_SHORT_NAME = {"🎯": "дартс", "🎳": "боулинг", "🏀": "баскетбол", "🎲": "кубик"}
@@ -200,8 +218,10 @@ def get_slot_combo(symbols: tuple[str, str, str]) -> str | None:
     return None
 
 
-def has_wins_left(chat_id: int, user_id: int) -> bool:
-    return win_counts.get(chat_id, {}).get(user_id, 0) < MAX_WINS_PER_USER
+def has_wins_left(chat_id: int, user) -> bool:
+    if is_admin(user):
+        return True  # у админов нет лимита побед
+    return win_counts.get(chat_id, {}).get(user.id, 0) < MAX_WINS_PER_USER
 
 
 def start_challenge(chat_id: int, challenge: dict) -> None:
@@ -362,7 +382,7 @@ async def handle_dice(message: Message):
     dice = message.dice
     user = message.from_user
 
-    if not has_wins_left(message.chat.id, user.id):
+    if not has_wins_left(message.chat.id, user):
         return
 
     chat_progress = progress.setdefault(message.chat.id, {})
