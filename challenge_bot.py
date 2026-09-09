@@ -27,6 +27,10 @@ import asyncio
 import logging
 import os
 import re
+import sqlite3
+import time
+from contextlib import closing
+from html import escape as html_escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -36,8 +40,20 @@ from aiogram.types import Message
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
 
-ADMIN_USERNAMES = {"Meduza_owner"}
+ADMIN_USERNAMES = {"nexoraizfuck", "Raivens1", "Mtl_sr"}
 ADMINS_LINE = " ".join(f"@{u}" for u in ADMIN_USERNAMES)
+
+# ---- ТУРНИР (учитывает только прокруты слота 🎰, отдельно от челленджей) ----
+# путь к базе данных. На Railway контейнер эфемерный — подключи Volume и
+# укажи DB_PATH внутри него, иначе база обнулится при каждом деплое.
+DB_PATH = os.getenv("DB_PATH", "challenge_bot.db")
+
+STARS_PER_SPIN = 2          # звёзды начисляются за ЛЮБОЙ прокрут слота
+TOURNAMENT_DAYS = 7         # сколько дней длится турнир
+
+PRIZE_1 = "NFT"
+PRIZE_2 = "100"
+PRIZE_3 = "50"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -182,6 +198,243 @@ def target_description(emoji: str, value: int) -> str:
 
 
 DICE_SHORT_NAME = {"🎯": "дартс", "🎳": "боулинг", "🏀": "баскетбол", "🎲": "кубик"}
+
+# ---------------------------------------------------------------------------
+# БАЗА ДАННЫХ ТУРНИРА (sqlite) — считает прокруты слота 🎰 по чатам
+# ---------------------------------------------------------------------------
+
+
+def db_connect() -> sqlite3.Connection:
+    folder = os.path.dirname(DB_PATH)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
+
+def init_db() -> None:
+    with closing(db_connect()) as conn, conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id  INTEGER NOT NULL,
+                user_id  INTEGER NOT NULL,
+                username TEXT,
+                PRIMARY KEY (chat_id, user_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spins (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id  INTEGER NOT NULL,
+                user_id  INTEGER NOT NULL,
+                ts       INTEGER NOT NULL,
+                stars    INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                chat_id INTEGER NOT NULL,
+                key     TEXT NOT NULL,
+                value   TEXT,
+                PRIMARY KEY (chat_id, key)
+            )
+            """
+        )
+
+
+def upsert_tournament_user(chat_id: int, user_id: int, name: str) -> None:
+    with closing(db_connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO users(chat_id, user_id, username) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id, user_id) DO UPDATE SET username=excluded.username",
+            (chat_id, user_id, name),
+        )
+
+
+def add_tournament_spin(chat_id: int, user_id: int, stars: int) -> None:
+    with closing(db_connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO spins(chat_id, user_id, ts, stars) VALUES (?,?,?,?)",
+            (chat_id, user_id, int(time.time()), stars),
+        )
+
+
+def get_tournament_setting(chat_id: int, key: str):
+    with closing(db_connect()) as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE chat_id=? AND key=?", (chat_id, key)
+        ).fetchone()
+        return row[0] if row else None
+
+
+def set_tournament_setting(chat_id: int, key: str, value) -> None:
+    with closing(db_connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO settings(chat_id, key, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(chat_id, key) DO UPDATE SET value=excluded.value",
+            (chat_id, key, str(value)),
+        )
+
+
+def start_tournament(chat_id: int) -> int:
+    now = int(time.time())
+    set_tournament_setting(chat_id, "tournament_start", now)
+    set_tournament_setting(chat_id, "tournament_end", "")
+    set_tournament_setting(chat_id, "tournament_active", 1)
+    return now
+
+
+def end_tournament(chat_id: int) -> None:
+    set_tournament_setting(chat_id, "tournament_end", int(time.time()))
+    set_tournament_setting(chat_id, "tournament_active", 0)
+
+
+def get_tournament_state(chat_id: int):
+    """Возвращает (start_ts | None, end_ts | None, active: bool)."""
+    start = get_tournament_setting(chat_id, "tournament_start")
+    end = get_tournament_setting(chat_id, "tournament_end")
+    active = get_tournament_setting(chat_id, "tournament_active")
+    start_ts = int(start) if start else None
+    end_ts = int(end) if end else None
+    is_active = bool(active) and active == "1"
+    return start_ts, end_ts, is_active
+
+
+def get_tournament_leaderboard(chat_id: int, limit: int = 3):
+    """Топ по количеству прокрутов слота (звёзды — доп. инфо, на место не влияют)."""
+    start_ts, end_ts, _active = get_tournament_state(chat_id)
+    if start_ts is None:
+        return []
+    window_end = end_ts if end_ts else int(time.time())
+
+    with closing(db_connect()) as conn:
+        rows = conn.execute(
+            """
+            SELECT u.user_id, u.username,
+                   COALESCE(SUM(s.stars), 0)  AS stars,
+                   COUNT(s.id)                AS spins
+            FROM users u
+            JOIN spins s ON s.user_id = u.user_id AND s.chat_id = u.chat_id
+            WHERE u.chat_id = ? AND s.ts >= ? AND s.ts <= ?
+            GROUP BY u.user_id
+            HAVING spins > 0
+            ORDER BY spins DESC, stars DESC
+            LIMIT ?
+            """,
+            (chat_id, start_ts, window_end, limit),
+        ).fetchall()
+    return rows
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not (12 <= n % 100 <= 14):
+        return few
+    return many
+
+
+def stars_word(n: int) -> str:
+    return plural(n, "звезда", "звезды", "звёзд")
+
+
+def spins_word(n: int) -> str:
+    return plural(n, "прокрут", "прокрута", "прокрутов")
+
+
+def days_word(n: int) -> str:
+    return plural(n, "день", "дня", "дней")
+
+
+def hours_word(n: int) -> str:
+    return plural(n, "час", "часа", "часов")
+
+
+TOURNAMENT_MEDALS = [
+    '<tg-emoji emoji-id="5440539497383087970">🥇</tg-emoji>',
+    '<tg-emoji emoji-id="5447203607294265305">🥈</tg-emoji>',
+    '<tg-emoji emoji-id="5453902265922376865">🥉</tg-emoji>',
+]
+T_FIRE = '<tg-emoji emoji-id="5463154755054349837">🔥</tg-emoji>'
+T_DIAMOND = '<tg-emoji emoji-id="5280858699286471614">💎</tg-emoji>'
+T_GIFT = '<tg-emoji emoji-id="5436006606078769970">🎁</tg-emoji>'
+T_CUP = '<tg-emoji emoji-id="5280769763398671636">🏆</tg-emoji>'
+T_ROCKET = '<tg-emoji emoji-id="5283080528818360566">🚀</tg-emoji>'
+T_STAR = '<tg-emoji emoji-id="5924870095925942277">⭐️</tg-emoji>'
+T_CHART = '<tg-emoji emoji-id="5436331451635245129">📈</tg-emoji>'
+T_SLOT = '<tg-emoji emoji-id="5915833712368424979">🎰</tg-emoji>'
+T_SMILE = '<tg-emoji emoji-id="5461117441612462242">🙂</tg-emoji>'
+T_HOURGLASS = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
+
+
+def tournament_user_link(user_id: int, name: str) -> str:
+    safe_name = html_escape(name or "Без имени")
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+def build_tournament_time_left_line(chat_id: int) -> str:
+    start_ts, end_ts, active = get_tournament_state(chat_id)
+
+    if start_ts is None:
+        return f"{T_HOURGLASS} Турнир ещё не запущен. Ждите объявления от администрации!"
+
+    if not active:
+        return f"{T_HOURGLASS} Турнир завершён! Ждите начала нового 🏁"
+
+    target_end = start_ts + TOURNAMENT_DAYS * 86400
+    remaining = target_end - int(time.time())
+    if remaining <= 0:
+        return f"{T_HOURGLASS} Рейтинг обновляется. Турнир вот-вот завершится!"
+
+    days = remaining // 86400
+    hours = (remaining % 86400) // 3600
+    if days > 0:
+        left = f"{days} {days_word(days)} {hours} {hours_word(hours)}"
+    else:
+        minutes = (remaining % 3600) // 60
+        if hours > 0:
+            left = f"{hours} {hours_word(hours)} {minutes} мин"
+        else:
+            left = f"{minutes} мин"
+    return f"{T_HOURGLASS} Рейтинг обновляется. До конца турнира осталось: {left}!"
+
+
+def build_tournament_top_text(chat_id: int) -> str:
+    rows = get_tournament_leaderboard(chat_id, limit=3)
+
+    lines = [
+        f"{T_FIRE} Встречайте ТОП пользователей за эту неделю {T_DIAMOND}",
+        "",
+        f"{TOURNAMENT_MEDALS[0]} место — {PRIZE_1} {T_GIFT}",
+        f"{TOURNAMENT_MEDALS[1]} место — {PRIZE_2}{T_CUP}",
+        f"{TOURNAMENT_MEDALS[2]} место — {PRIZE_3}{T_ROCKET}",
+        "",
+        f"{T_STAR} Напоминаем: чем больше прокрутов слота — тем выше твоё место {T_GIFT}",
+        "",
+        f"{T_CHART} Текущий рейтинг лидеров:",
+    ]
+
+    if not rows:
+        lines.append(f"Пока никто не крутил слот {T_SMILE}")
+    else:
+        for i, (user_id, username, stars, spins) in enumerate(rows):
+            lines.append(f"{TOURNAMENT_MEDALS[i]} {tournament_user_link(user_id, username)}")
+            lines.append(
+                f"{T_SLOT} {spins} {spins_word(spins)} | "
+                f"{T_STAR} {stars} {stars_word(stars)}"
+            )
+            lines.append("")
+
+    lines.append(build_tournament_time_left_line(chat_id))
+    return "\n".join(lines).strip()
+
 
 # Активный челлендж в чате: chat_id -> {
 #   "category": "slot" | "dice",
@@ -367,6 +620,36 @@ async def cmd_reset_wins(message: Message):
 
 
 # ---------------------------------------------------------------------------
+# КОМАНДЫ ТУРНИРА (учитывает прокруты слота 🎰, отдельно от челленджей)
+# ---------------------------------------------------------------------------
+
+@dp.message(F.text.regexp(r"(?i)^/start_tournament(?:@\S+)?"))
+async def cmd_start_tournament(message: Message) -> None:
+    if not is_admin(message.from_user):
+        await message.reply("Эта команда доступна только админам.")
+        return
+    start_tournament(message.chat.id)
+    await message.answer(
+        f"✅ Турнир запущен! Он продлится {TOURNAMENT_DAYS} "
+        f"{days_word(TOURNAMENT_DAYS)}. Напишите «топ», чтобы увидеть рейтинг."
+    )
+
+
+@dp.message(F.text.regexp(r"(?i)^/end_tournament(?:@\S+)?"))
+async def cmd_end_tournament(message: Message) -> None:
+    if not is_admin(message.from_user):
+        await message.reply("Эта команда доступна только админам.")
+        return
+    end_tournament(message.chat.id)
+    await message.answer("🏁 Турнир завершён. Итоговый рейтинг заморожен — напишите «топ», чтобы его увидеть.")
+
+
+@dp.message(F.text.func(lambda t: bool(t) and t.strip().lower() == "топ"))
+async def cmd_tournament_top(message: Message) -> None:
+    await message.answer(build_tournament_top_text(message.chat.id))
+
+
+# ---------------------------------------------------------------------------
 # ОБРАБОТКА БРОСКОВ ДАЙСОВ
 # ---------------------------------------------------------------------------
 
@@ -375,12 +658,18 @@ async def handle_dice(message: Message):
     if message.forward_origin is not None or message.forward_date is not None:
         return
 
+    dice = message.dice
+    user = message.from_user
+
+    # Учёт в турнире: любой прокрут слота 🎰 засчитывается независимо от
+    # активного челленджа (админские прокруты в статистику не идут).
+    if dice.emoji == "🎰" and user is not None and not is_admin(user):
+        upsert_tournament_user(message.chat.id, user.id, user.full_name)
+        add_tournament_spin(message.chat.id, user.id, STARS_PER_SPIN)
+
     challenge = active_challenge.get(message.chat.id)
     if challenge is None:
         return
-
-    dice = message.dice
-    user = message.from_user
 
     if not has_wins_left(message.chat.id, user):
         return
@@ -443,6 +732,7 @@ async def handle_dice(message: Message):
 
 
 async def main():
+    init_db()
     await dp.start_polling(bot)
 
 
