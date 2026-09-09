@@ -1,14 +1,17 @@
 """
 Отдельный бот-челлендж: команды на комбинации слот-машины (BAR, виноград,
-лимоны, 777) и на дайсы (дартс, боулинг, баскетбол, футбол, кубик).
+лимоны, 777) и на дайсы (дартс, боулинг, баскетбол, кубик).
+
+Для дартса/боулинга/баскетбола/кубика админ теперь САМ выбирает,
+какое именно значение считается попаданием (не всегда "6").
 
 Для каждого типа есть ДВЕ версии команды:
-  - обычная (СУММАРНЫЙ счёт, промахи не мешают): /Darts N
-  - "подряд" (промах обнуляет счётчик до нуля): /DartsPodryad N
+  - обычная (СУММАРНЫЙ счёт, промахи не мешают): /Darts значение count
+  - "подряд" (промах обнуляет счётчик до нуля): /DartsPodryad значение count
 
 Челлендж не завершается после первой победы — работает, пока админ
-не остановит его командой /stop (или /StopChallenge). Каждый участник
-может побеждать до MAX_WINS_PER_USER раз, дальше его броски не считаются.
+не остановит его командой /stop. Каждый участник может побеждать
+до MAX_WINS_PER_USER раз, дальше его броски не считаются.
 
 Установка:
     pip install aiogram
@@ -43,21 +46,28 @@ dp = Dispatcher()
 
 # ---------------------------------------------------------------------------
 # ПРЕМИУМ-ЭМОДЗИ. Реально отображаются с анимацией только если у ВЛАДЕЛЬЦА
-# этого бота есть Telegram Premium (или куплен username через Fragment) —
-# так требует сам Telegram. Иначе виден обычный fallback-смайлик — это ок.
+# этого бота есть Telegram Premium (или куплен username через Fragment).
 # ---------------------------------------------------------------------------
 PREMIUM_EMOJI_IDS = {
-    "party": "5208541126583136130",     # 🎉
-    "check": "5465665580050717956",     # ✔️
-    "blue_dot": "5465250866598547954",  # 🔵
-    "pin": "5465298472016059249",       # 📌
-    "seven": "4938373072185984758",     # 7️⃣
-    "star": "5924870095925942277",      # ⭐
-    "slot_spin": "5915833712368424979", # 🎰 (в тексте "крути ещё")
-    "dart": "5350460637182993292",      # 🎯
-    "bowling_six": "5891120371762990493",  # 6️⃣ (боулинг — кегли)
-    "cube_six": "5891181334528789506",     # 6️⃣ (кубик)
-    "gift_smile": "5240487046086169983",   # 😀
+    "party": "5208541126583136130",      # 🎉
+    "check": "5465665580050717956",      # ✔️
+    "blue_dot": "5465250866598547954",   # 🔵
+    "pin": "5465298472016059249",        # 📌
+    "seven": "4938373072185984758",      # 7️⃣
+    "star": "5924870095925942277",       # ⭐
+    "slot_spin": "5915833712368424979",  # 🎰
+    "gift_smile": "5240487046086169983", # 😀
+    "sad": "5456580397074778248",        # 😢 (после "один промах — счётчик обнуляется")
+    "cube_icon": "5260547274957672345",  # 🎲 (общая иконка кубика)
+}
+
+# ID для КОНКРЕТНЫХ цифр у конкретных дайсов (только те, что реально даны).
+# Формат ключа: (эмодзи, значение) -> id. Для остальных значений premium
+# ID нет — покажется обычная цифра, это нормально.
+SPECIFIC_DIGIT_PREMIUM_IDS = {
+    ("🎯", 6): "5891181334528789506",  # дартс, попадание в 6 (центр)
+    ("🎳", 6): "5891120371762990493",  # боулинг, все кегли (6)
+    ("🏀", 5): "5891181665241271999",  # баскетбол, идеальное попадание (5)
 }
 
 
@@ -66,6 +76,19 @@ def tg(key: str, fallback: str) -> str:
     if not emoji_id:
         return fallback
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
+def keycap(value: int) -> str:
+    """Обычная цифра в стиле Telegram-keycap, например 6 -> '6️⃣'."""
+    return f"{value}\ufe0f\u20e3"
+
+
+def digit_html(emoji: str, value: int) -> str:
+    fallback = keycap(value)
+    emoji_id = SPECIFIC_DIGIT_PREMIUM_IDS.get((emoji, value))
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    return fallback
 
 
 REEL_SYMBOLS = ["BAR", "🍇", "🍋", "7️⃣"]
@@ -80,44 +103,38 @@ COMBO_DISPLAY_NAMES = {
 }
 SLOT_COMMAND_TO_COMBO = {"Bar": "bar", "Seven": "seven", "Lemons": "lemons", "Grapes": "grapes"}
 
-# Значения dice.value, которые считаются "попаданием" для каждого эмодзи:
-#   🎯 дартс     — 6 = яблочко
-#   🎳 боулинг   — 6 = страйк
-#   🏀 баскетбол — 4 или 5 = мяч влетел в кольцо
-#   ⚽ футбол    — 3, 4 или 5 = гол
-#   🎲 кубик     — 6 = шестёрка
-HIT_VALUES = {
-    "🎯": {6},
-    "🎳": {6},
-    "🏀": {4, 5},
-    "⚽": {3, 4, 5},
-    "🎲": {6},
-}
-DICE_EMOJI_NAMES = {
-    "🎯": "яблочко в дартс",
-    "🎳": "страйк в боулинг",
-    "🏀": "попадание в кольцо",
-    "⚽": "гол",
-    "🎲": "шестёрка на кубике",
-}
-DICE_COMMAND_TO_EMOJI = {
-    "Darts": "🎯", "Bowling": "🎳", "Basketball": "🏀", "Football": "⚽", "Cube": "🎲",
-}
-# Отдельные команды для режима "подряд"
+# Диапазон допустимых значений для каждого типа дайса.
+DICE_VALUE_RANGE = {"🎯": (1, 6), "🎳": (1, 6), "🏀": (1, 5), "🎲": (1, 6)}
+DICE_COMMAND_TO_EMOJI = {"Darts": "🎯", "Bowling": "🎳", "Basketball": "🏀", "Cube": "🎲"}
 DICE_PODRYAD_COMMAND_TO_EMOJI = {
-    "DartsPodryad": "🎯", "BowlingPodryad": "🎳", "BasketballPodryad": "🏀",
-    "FootballPodryad": "⚽", "CubePodryad": "🎲",
+    "DartsPodryad": "🎯", "BowlingPodryad": "🎳", "BasketballPodryad": "🏀", "CubePodryad": "🎲",
 }
+
+
+def target_description(emoji: str, value: int) -> str:
+    """Человекочитаемое описание цели для конкретного дайса и значения."""
+    digit = digit_html(emoji, value)
+    if emoji == "🎯":
+        return f"Попасть ровно в центр {digit}"
+    if emoji == "🎳":
+        return f"Выбить все кегли {digit}"
+    if emoji == "🏀":
+        return f"Попасть в кольцо идеально {digit}"
+    if emoji == "🎲":
+        return f"{digit} {tg('cube_icon', '🎲')}"
+    return digit
+
+
+DICE_SHORT_NAME = {"🎯": "дартс", "🎳": "боулинг", "🏀": "баскетбол", "🎲": "кубик"}
 
 # Активный челлендж в чате: chat_id -> {
 #   "category": "slot" | "dice",
-#   "key": "bar"/"seven"/"lemons"/"grapes"  ИЛИ  "🎯"/"🎳"/"🏀"/"⚽"/"🎲",
+#   "key": "bar"/"seven"/"lemons"/"grapes"  ИЛИ  "🎯"/"🎳"/"🏀"/"🎲",
+#   "value": int | None (нужное значение дайса, только для category="dice"),
 #   "mode": "cumulative" | "streak",
 #   "target": int,
 # }
 active_challenge: dict[int, dict] = {}
-# chat_id -> {user_id: текущее число}
-# cumulative — сумма попаданий за всё время; streak — серия подряд (промах = 0)
 progress: dict[int, dict] = {}
 
 MAX_WINS_PER_USER = 2
@@ -154,53 +171,23 @@ def start_challenge(chat_id: int, challenge: dict) -> None:
     progress[chat_id] = {}
 
 
-async def announce_win(message: Message, user, category: str, key: str) -> None:
+async def announce_win(message: Message, user, challenge: dict) -> None:
     who = mention(user.id, user.full_name)
     chat_wins = win_counts.setdefault(message.chat.id, {})
     chat_wins[user.id] = chat_wins.get(user.id, 0) + 1
 
-    if category == "slot" and key == "seven":
-        text = (
-            f"{who}, {tg('party', '🎉')} Выигрыш! Слот выдал\n"
-            f"{COMBO_DISPLAY_NAMES['seven']}!\n\n"
-            f"На этом веселье не заканчивается! Крути {tg('slot_spin', '🎰')} и получай звезды "
-            f"{tg('star', '⭐')}\n\n"
-            f"За выдачей пишите: {ADMINS_LINE}"
-        )
-    elif category == "slot":
-        text = (
-            f"{who}, 🎉 Выигрыш! Слот выдал {COMBO_DISPLAY_NAMES[key]}!\n\n"
-            f"На этом веселье не заканчивается! Крутите слот-машину и получайте звезды ⭐\n\n"
-            f"За выдачей пишите: {ADMINS_LINE}"
-        )
-    elif key == "🎳":
-        text = (
-            f"{who}, {tg('party', '🎉')} Выигрыш! Вы сбили все кегли {tg('bowling_six', '6️⃣')}\n\n"
-            f"На этом веселье не заканчивается! Сбивай все кегли {tg('bowling_six', '6️⃣')} и "
-            f"получай звезды {tg('star', '⭐')}\n\nЗа выдачей пишите: {ADMINS_LINE}"
-        )
-    elif key == "🎯":
-        text = (
-            f"{who}, {tg('party', '🎉')} Выигрыш! Вы попали точно в цель {tg('dart', '🎯')}\n\n"
-            f"На этом веселье не заканчивается! Попадай идеально в центр {tg('dart', '🎯')} и "
-            f"получай звезды {tg('star', '⭐')}\n\nЗа выдачей пишите: {ADMINS_LINE}"
-        )
-    elif key == "🎲":
-        text = (
-            f"{who}, {tg('party', '🎉')} Выигрыш! Вы выбросили шестёрку {tg('cube_six', '6️⃣')}\n\n"
-            f"На этом веселье не заканчивается! Выбрасывай шестёрку {tg('cube_six', '6️⃣')} и "
-            f"получай звезды {tg('star', '⭐')}\n\nЗа выдачей пишите: {ADMINS_LINE}"
-        )
+    if challenge["category"] == "slot":
+        label = COMBO_DISPLAY_NAMES[challenge["key"]]
     else:
-        text = (
-            f"{who}, 🎉 Выигрыш! Вы выбили {DICE_EMOJI_NAMES[key]} {key}\n\n"
-            f"На этом веселье не заканчивается! Продолжайте и получайте звезды ⭐\n\n"
-            f"За выдачей пишите: {ADMINS_LINE}"
-        )
+        label = target_description(challenge["key"], challenge["value"])
 
+    text = (
+        f"{who}, {tg('party', '🎉')} Выигрыш! Условие выполнено: {label}\n\n"
+        f"На этом веселье не заканчивается! Продолжайте и получайте звезды {tg('star', '⭐')}\n\n"
+        f"За выдачей пишите: {ADMINS_LINE}"
+    )
     await message.reply(text)
-    # Челлендж НЕ завершается — сбрасываем прогресс только этому пользователю,
-    # чтобы он (если не выбрал лимит побед) мог выиграть ещё раз.
+    # Челлендж НЕ завершается — сбрасываем прогресс только этому пользователю.
     progress.setdefault(message.chat.id, {})[user.id] = 0
 
 
@@ -225,70 +212,78 @@ async def cmd_slot_challenge(message: Message):
         return
 
     target = int(args_str)
-    start_challenge(message.chat.id, {"category": "slot", "key": combo, "mode": "cumulative", "target": target})
-
-    if combo == "seven":
-        text = (
-            f"{tg('blue_dot', '🔵')}Лудка запущена {tg('check', '✔️')}\n"
-            f"{tg('pin', '📌')}Цель: {COMBO_DISPLAY_NAMES['seven']} - {target} раз"
-        )
-    else:
-        text = (
-            f"{tg('blue_dot', '🔵')}Лудка запущена {tg('check', '✔️')}\n"
-            f"{tg('pin', '📌')}Цель: {COMBO_DISPLAY_NAMES[combo]} - {target} раз"
-        )
-    await message.reply(text)
+    start_challenge(message.chat.id, {"category": "slot", "key": combo, "value": None, "mode": "cumulative", "target": target})
+    await message.reply(
+        f"{tg('blue_dot', '🔵')}Лудка запущена {tg('check', '✔️')}\n"
+        f"{tg('pin', '📌')}Цель: {COMBO_DISPLAY_NAMES[combo]} - {target} раз"
+    )
 
 
-@dp.message(F.text.regexp(r"(?i)^/(DartsPodryad|BowlingPodryad|BasketballPodryad|FootballPodryad|CubePodryad)(?:@\S+)?(?:\s+(\d+))?"))
+@dp.message(F.text.regexp(r"(?i)^/(DartsPodryad|BowlingPodryad|BasketballPodryad|CubePodryad)(?:@\S+)?(?:\s+(\d+)\s+(\d+))?"))
 async def cmd_dice_challenge_streak(message: Message):
     if not is_admin(message.from_user):
         await message.reply("Эта команда доступна только админам.")
         return
 
     match = re.match(
-        r"(?i)^/(DartsPodryad|BowlingPodryad|BasketballPodryad|FootballPodryad|CubePodryad)(?:@\S+)?(?:\s+(\d+))?",
+        r"(?i)^/(DartsPodryad|BowlingPodryad|BasketballPodryad|CubePodryad)(?:@\S+)?(?:\s+(\d+)\s+(\d+))?",
         message.text,
     )
     command_name = match.group(1)
     canonical = next((c for c in DICE_PODRYAD_COMMAND_TO_EMOJI if c.lower() == command_name.lower()), None)
     emoji = DICE_PODRYAD_COMMAND_TO_EMOJI.get(canonical)
-    args_str = match.group(2)
+    value_str, count_str = match.group(2), match.group(3)
 
-    target = int(args_str) if args_str else 2
-    if target <= 0:
-        await message.reply(f"Пример: /{command_name} 2 — сколько раз ПОДРЯД нужно попасть.")
+    if emoji is None or not value_str or not count_str:
+        lo, hi = DICE_VALUE_RANGE[emoji] if emoji else (1, 6)
+        await message.reply(
+            f"Пример: /{command_name} {hi} 2 — нужное значение ({lo}-{hi}) и сколько раз ПОДРЯД."
+        )
         return
 
-    start_challenge(message.chat.id, {"category": "dice", "key": emoji, "mode": "streak", "target": target})
+    value, target = int(value_str), int(count_str)
+    lo, hi = DICE_VALUE_RANGE[emoji]
+    if not (lo <= value <= hi) or target <= 0:
+        await message.reply(f"Значение должно быть от {lo} до {hi}, а число попаданий — больше нуля.")
+        return
+
+    start_challenge(message.chat.id, {"category": "dice", "key": emoji, "value": value, "mode": "streak", "target": target})
     await message.reply(
         f"{tg('blue_dot', '🔵')}Лудка запущена {tg('check', '✔️')}\n"
-        f"{tg('pin', '📌')}Цель: {DICE_EMOJI_NAMES[emoji]} {emoji} - {target} раз ПОДРЯД. "
-        f"Один промах — и счётчик обнуляется!"
+        f"{tg('pin', '📌')}Цель: {target_description(emoji, value)} - {target} раз ПОДРЯД. "
+        f"Один промах — и счётчик обнуляется! {tg('sad', '😢')}"
     )
 
 
-@dp.message(F.text.regexp(r"(?i)^/(Darts|Bowling|Basketball|Football|Cube)(?:@\S+)?(?:\s+(\d+))?"))
+@dp.message(F.text.regexp(r"(?i)^/(Darts|Bowling|Basketball|Cube)(?:@\S+)?(?:\s+(\d+)\s+(\d+))?"))
 async def cmd_dice_challenge_cumulative(message: Message):
     if not is_admin(message.from_user):
         await message.reply("Эта команда доступна только админам.")
         return
 
-    match = re.match(r"(?i)^/(Darts|Bowling|Basketball|Football|Cube)(?:@\S+)?(?:\s+(\d+))?", message.text)
+    match = re.match(r"(?i)^/(Darts|Bowling|Basketball|Cube)(?:@\S+)?(?:\s+(\d+)\s+(\d+))?", message.text)
     command_name = match.group(1)
     canonical = next((c for c in DICE_COMMAND_TO_EMOJI if c.lower() == command_name.lower()), None)
     emoji = DICE_COMMAND_TO_EMOJI.get(canonical)
-    args_str = match.group(2)
+    value_str, count_str = match.group(2), match.group(3)
 
-    if emoji is None or not args_str or int(args_str) <= 0:
-        await message.reply(f"Пример: /{command_name} 3 — сколько раз суммарно нужно попасть.")
+    if emoji is None or not value_str or not count_str:
+        lo, hi = DICE_VALUE_RANGE[emoji] if emoji else (1, 6)
+        await message.reply(
+            f"Пример: /{command_name} {hi} 3 — нужное значение ({lo}-{hi}) и сколько раз суммарно."
+        )
         return
 
-    target = int(args_str)
-    start_challenge(message.chat.id, {"category": "dice", "key": emoji, "mode": "cumulative", "target": target})
+    value, target = int(value_str), int(count_str)
+    lo, hi = DICE_VALUE_RANGE[emoji]
+    if not (lo <= value <= hi) or target <= 0:
+        await message.reply(f"Значение должно быть от {lo} до {hi}, а число попаданий — больше нуля.")
+        return
+
+    start_challenge(message.chat.id, {"category": "dice", "key": emoji, "value": value, "mode": "cumulative", "target": target})
     await message.reply(
         f"{tg('blue_dot', '🔵')}Лудка запущена {tg('check', '✔️')}\n"
-        f"{tg('pin', '📌')}Цель: {DICE_EMOJI_NAMES[emoji]} {emoji} - {target} раз (суммарно)"
+        f"{tg('pin', '📌')}Цель: {target_description(emoji, value)} - {target} раз (суммарно)"
     )
 
 
@@ -319,8 +314,6 @@ async def cmd_reset_wins(message: Message):
 
 @dp.message(F.dice)
 async def handle_dice(message: Message):
-    # Пересланные сообщения игнорируем полностью — иначе можно абузить
-    # челлендж, форвардя себе старый выигрышный бросок.
     if message.forward_origin is not None or message.forward_date is not None:
         return
 
@@ -332,7 +325,7 @@ async def handle_dice(message: Message):
     user = message.from_user
 
     if not has_wins_left(message.chat.id, user.id):
-        return  # уже выиграл максимум раз — броски больше не считаются
+        return
 
     chat_progress = progress.setdefault(message.chat.id, {})
     target = challenge["target"]
@@ -347,63 +340,35 @@ async def handle_dice(message: Message):
         chat_progress[user.id] = count
 
         if count >= target:
-            await announce_win(message, user, "slot", combo)
+            await announce_win(message, user, challenge)
         else:
-            label = COMBO_DISPLAY_NAMES[combo]
-            gift = tg("gift_smile", "😀")
-            if combo == "seven":
-                await message.reply(
-                    f"{mention(user.id, user.full_name)}, {tg('party', '🎉')} Отличный результат! "
-                    f"Слот выдал\n{label}!\nОсталось еще выбить {label} {target - count} раз "
-                    f"чтобы забрать приз {gift}"
-                )
-            else:
-                await message.reply(
-                    f"{mention(user.id, user.full_name)}, выбил {label}! Прогресс: {count}/{target}"
-                )
+            await message.reply(
+                f"{mention(user.id, user.full_name)}, выбил {COMBO_DISPLAY_NAMES[combo]}! "
+                f"Прогресс: {count}/{target}"
+            )
 
     elif challenge["category"] == "dice" and dice.emoji == challenge["key"]:
-        emoji = challenge["key"]
-        hit = dice.value in HIT_VALUES[emoji]
+        hit = dice.value == challenge["value"]
 
         if challenge["mode"] == "cumulative":
             if not hit:
-                return  # промах просто игнорируем, счётчик не трогаем
+                return
             count = chat_progress.get(user.id, 0) + 1
             chat_progress[user.id] = count
             if count >= target:
-                await announce_win(message, user, "dice", emoji)
+                await announce_win(message, user, challenge)
             else:
-                remaining = target - count
-                gift = tg("gift_smile", "😀")
-                if emoji == "🎳":
-                    await message.reply(
-                        f"{mention(user.id, user.full_name)}, {tg('party', '🎉')} Отличный результат! "
-                        f"Вы сбили все кегли {tg('bowling_six', '6️⃣')}\n\n"
-                        f"Осталось еще выбить {tg('bowling_six', '6️⃣')} {remaining} раз чтобы забрать приз {gift}"
-                    )
-                elif emoji == "🎲":
-                    await message.reply(
-                        f"{mention(user.id, user.full_name)}, {tg('party', '🎉')} Отличный результат! "
-                        f"Вы попали идеально в центр {tg('cube_six', '6️⃣')}\n\n"
-                        f"Осталось еще выбить {tg('cube_six', '6️⃣')} {remaining} раз чтобы забрать приз {gift}"
-                    )
-                elif emoji == "🎯":
-                    await message.reply(
-                        f"{mention(user.id, user.full_name)}, попал в {tg('dart', '🎯')}! "
-                        f"Прогресс: {count}/{target}"
-                    )
-                else:
-                    await message.reply(
-                        f"{mention(user.id, user.full_name)}, выбил {DICE_EMOJI_NAMES[emoji]}! "
-                        f"Прогресс: {count}/{target}"
-                    )
-        else:  # streak — режим "подряд"
+                await message.reply(
+                    f"{mention(user.id, user.full_name)}, {tg('party', '🎉')} Отличный результат! "
+                    f"{target_description(challenge['key'], challenge['value'])}\n\n"
+                    f"Прогресс: {count}/{target}"
+                )
+        else:  # streak
             if hit:
                 count = chat_progress.get(user.id, 0) + 1
                 chat_progress[user.id] = count
                 if count >= target:
-                    await announce_win(message, user, "dice", emoji)
+                    await announce_win(message, user, challenge)
                 else:
                     await message.reply(
                         f"{mention(user.id, user.full_name)}, попал! Серия подряд: {count}/{target}. "
