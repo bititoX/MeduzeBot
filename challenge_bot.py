@@ -27,7 +27,7 @@ from aiogram.types import Message
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
 
 # Username админов (без @), которым разрешено запускать/останавливать челленджи
-ADMIN_USERNAMES = {"nexoraizfuck", "Meduza_owner"}
+ADMIN_USERNAMES = {"nexoraizfuck", "Raivens1", "Mtl_sr"}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -51,10 +51,29 @@ SLOT_COMMAND_TO_COMBO = {
     "Grapes": "grapes",
 }
 
-# Дартс/боулинг: значение 6 = яблочко (дартс) / страйк (боулинг).
-STREAK_TARGET_VALUE = 6
-STREAK_EMOJI_NAMES = {"🎯": "яблочко в дартс 🎯", "🎳": "страйк в боулинг 🎳"}
-STREAK_COMMAND_TO_EMOJI = {"Darts": "🎯", "Bowling": "🎳"}
+# Значения dice.value, которые считаются "попаданием" для каждого эмодзи:
+#   🎯 дартс     — 6 = яблочко
+#   🎳 боулинг   — 6 = страйк
+#   🏀 баскетбол — 4 или 5 = мяч влетел в кольцо
+#   ⚽ футбол    — 3, 4 или 5 = гол
+STREAK_SUCCESS_VALUES = {
+    "🎯": {6},
+    "🎳": {6},
+    "🏀": {4, 5},
+    "⚽": {3, 4, 5},
+}
+STREAK_EMOJI_NAMES = {
+    "🎯": "яблочко в дартс 🎯",
+    "🎳": "страйк в боулинг 🎳",
+    "🏀": "попадание в кольцо 🏀",
+    "⚽": "гол ⚽",
+}
+STREAK_COMMAND_TO_EMOJI = {
+    "Darts": "🎯",
+    "Bowling": "🎳",
+    "Basketball": "🏀",
+    "Football": "⚽",
+}
 
 # Активный челлендж в чате: chat_id -> {
 #   "kind": "slot" | "streak",
@@ -144,13 +163,13 @@ async def cmd_slot_challenge(message: Message):
     )
 
 
-@dp.message(F.text.regexp(r"(?i)^/(Darts|Bowling)(?:@\S+)?(?:\s+(\d+))?"))
+@dp.message(F.text.regexp(r"(?i)^/(Darts|Bowling|Basketball|Football)(?:@\S+)?(?:\s+(\d+))?"))
 async def cmd_streak_challenge(message: Message):
     if not is_admin(message.from_user):
         await message.reply("Эта команда доступна только админам.")
         return
 
-    match = re.match(r"(?i)^/(Darts|Bowling)(?:@\S+)?(?:\s+(\d+))?", message.text)
+    match = re.match(r"(?i)^/(Darts|Bowling|Basketball|Football)(?:@\S+)?(?:\s+(\d+))?", message.text)
     command_name = match.group(1)
     canonical = next((c for c in STREAK_COMMAND_TO_EMOJI if c.lower() == command_name.lower()), None)
     emoji = STREAK_COMMAND_TO_EMOJI.get(canonical)
@@ -196,6 +215,11 @@ async def cmd_reset_wins(message: Message):
 
 @dp.message(F.dice)
 async def handle_dice(message: Message):
+    # Пересланные сообщения игнорируем полностью: иначе можно переслать себе
+    # (или кому-то) старый выигрышный бросок и абузить челлендж.
+    if message.forward_origin is not None or message.forward_date is not None:
+        return
+
     challenge = active_challenge.get(message.chat.id)
     if challenge is None:
         return
@@ -227,7 +251,7 @@ async def handle_dice(message: Message):
             )
 
     elif challenge["kind"] == "streak" and dice.emoji == challenge["emoji"]:
-        hit = dice.value == STREAK_TARGET_VALUE
+        hit = dice.value in STREAK_SUCCESS_VALUES[challenge["emoji"]]
         target = challenge["target"]
 
         if hit:
