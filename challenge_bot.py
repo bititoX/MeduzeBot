@@ -51,10 +51,6 @@ DB_PATH = os.getenv("DB_PATH", "challenge_bot.db")
 STARS_PER_SPIN = 2          # звёзды начисляются за ЛЮБОЙ прокрут слота
 TOURNAMENT_DAYS = 7         # сколько дней длится турнир
 
-PRIZE_1 = "NFT"
-PRIZE_2 = "100"
-PRIZE_3 = "50"
-
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -365,8 +361,6 @@ TOURNAMENT_MEDALS = [
 T_FIRE = '<tg-emoji emoji-id="5463154755054349837">🔥</tg-emoji>'
 T_DIAMOND = '<tg-emoji emoji-id="5280858699286471614">💎</tg-emoji>'
 T_GIFT = '<tg-emoji emoji-id="5436006606078769970">🎁</tg-emoji>'
-T_CUP = '<tg-emoji emoji-id="5280769763398671636">🏆</tg-emoji>'
-T_ROCKET = '<tg-emoji emoji-id="5283080528818360566">🚀</tg-emoji>'
 T_STAR = '<tg-emoji emoji-id="5924870095925942277">⭐️</tg-emoji>'
 T_CHART = '<tg-emoji emoji-id="5436331451635245129">📈</tg-emoji>'
 T_SLOT = '<tg-emoji emoji-id="5915833712368424979">🎰</tg-emoji>'
@@ -411,10 +405,6 @@ def build_tournament_top_text(chat_id: int) -> str:
 
     lines = [
         f"{T_FIRE} Встречайте ТОП пользователей за эту неделю {T_DIAMOND}",
-        "",
-        f"{TOURNAMENT_MEDALS[0]} место — {PRIZE_1} {T_GIFT}",
-        f"{TOURNAMENT_MEDALS[1]} место — {PRIZE_2}{T_CUP}",
-        f"{TOURNAMENT_MEDALS[2]} место — {PRIZE_3}{T_ROCKET}",
         "",
         f"{T_STAR} Напоминаем: чем больше прокрутов слота — тем выше твоё место {T_GIFT}",
         "",
@@ -598,7 +588,7 @@ async def cmd_dice_challenge_cumulative(message: Message):
     )
 
 
-@dp.message(F.text.regexp(r"(?i)^/(?:StopChallenge|stop)(?:@\S+)?"))
+@dp.message(F.text.regexp(r"(?i)^/(?:StopChallenge|stop)(?!\w)(?:@\S+)?"))
 async def cmd_stop_challenge(message: Message):
     if not is_admin(message.from_user):
         await message.reply("Эта команда доступна только админам.")
@@ -635,7 +625,7 @@ async def cmd_start_tournament(message: Message) -> None:
     )
 
 
-@dp.message(F.text.regexp(r"(?i)^/end_tournament(?:@\S+)?"))
+@dp.message(F.text.regexp(r"(?i)^/(?:end_tournament|stop_tournament)(?:@\S+)?"))
 async def cmd_end_tournament(message: Message) -> None:
     if not is_admin(message.from_user):
         await message.reply("Эта команда доступна только админам.")
